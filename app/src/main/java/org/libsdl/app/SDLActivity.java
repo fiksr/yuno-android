@@ -1,5 +1,6 @@
 package org.libsdl.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -21,8 +22,10 @@ import android.hardware.Sensor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Message;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
@@ -222,6 +225,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     // This is what SDL runs in. It invokes SDL_main(), eventually
     protected static Thread mSDLThread;
 
+    protected static final int REQUEST_STORAGE_PERMISSION = 9999;
+    protected static Dialog mStorageDialog = null;
+
     protected static SDLGenericMotionListener_API12 getMotionListener() {
         if (mMotionListener == null) {
             if (Build.VERSION.SDK_INT >= 26 /* Android 8.0 (O) */) {
@@ -306,6 +312,7 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         mCursors = new Hashtable<Integer, PointerIcon>();
         mLastCursorID = 0;
         mSDLThread = null;
+        mStorageDialog = null;
         mIsResumedCalled = false;
         mHasFocus = true;
         mNextNativeState = NativeState.INIT;
@@ -608,6 +615,11 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
             }
         }
 
+        if (mStorageDialog != null && mStorageDialog.isShowing()) {
+            mStorageDialog.dismiss();
+            mStorageDialog = null;
+        }
+
         SDLActivity.nativeQuit();
 
         super.onDestroy();
@@ -705,6 +717,10 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
         if (mNextNativeState == NativeState.RESUMED) {
             if (mSurface.mIsSurfaceReady && mHasFocus && mIsResumedCalled) {
                 if (mSDLThread == null) {
+                    if (mSingleton != null && !mSingleton.checkAndPromptStoragePermission()) {
+                        Log.i(TAG, "Storage permission not yet granted, awaiting user confirmation");
+                        return;
+                    }
                     // This is the entry point to the C app.
                     // Start up the C app thread and enable sensor input for the first time
                     // FIXME: Why aren't we enabling sensor input at start?
@@ -1771,6 +1787,70 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     /**
      * This method is called by SDL using JNI.
      */
+    public static boolean checkStoragePermission(Context context) {
+        if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
+            return Environment.isExternalStorageManager();
+        } else if (Build.VERSION.SDK_INT >= 23 /* Android 6.0 (M) */) {
+            return context.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    protected boolean checkAndPromptStoragePermission() {
+        if (checkStoragePermission(this)) {
+            if (mStorageDialog != null && mStorageDialog.isShowing()) {
+                mStorageDialog.dismiss();
+                mStorageDialog = null;
+            }
+            return true;
+        }
+
+        if (mStorageDialog != null && mStorageDialog.isShowing()) {
+            return false;
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Storage Permission Required");
+        builder.setMessage("YU-NO requires All Files Access to load game assets from /sdcard/YuNo/.\n\nPlease enable \"Allow management of all files\" on the next screen to play.");
+        builder.setPositiveButton("Grant Permission", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                        intent.setData(Uri.parse("package:" + getPackageName()));
+                        startActivity(intent);
+                    } catch (Exception e) {
+                        try {
+                            Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                            startActivity(intent);
+                        } catch (Exception ex) {
+                            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                            intent.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(intent);
+                        }
+                    }
+                } else if (Build.VERSION.SDK_INT >= 23) {
+                    requestPermissions(new String[]{
+                        Manifest.permission.READ_EXTERNAL_STORAGE,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    }, REQUEST_STORAGE_PERMISSION);
+                }
+            }
+        });
+        builder.setNegativeButton("Exit", new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                finish();
+            }
+        });
+        builder.setCancelable(false);
+        mStorageDialog = builder.create();
+        mStorageDialog.show();
+
+        return false;
+    }
+
     public static void requestPermission(String permission, int requestCode) {
         if (Build.VERSION.SDK_INT < 23 /* Android 6.0 (M) */) {
             nativePermissionResult(requestCode, true);
@@ -1788,6 +1868,13 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         boolean result = (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED);
+        if (requestCode == REQUEST_STORAGE_PERMISSION) {
+            if (result) {
+                resumeNativeThread();
+            } else {
+                checkAndPromptStoragePermission();
+            }
+        }
         nativePermissionResult(requestCode, result);
     }
 
