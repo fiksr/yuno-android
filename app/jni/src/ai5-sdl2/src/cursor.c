@@ -838,10 +838,17 @@ static void cursor_fini(void)
 
 static uint32_t anim_cb(uint32_t interval, void *_)
 {
+#ifdef __ANDROID__
+	return 0;
+#else
+	if (!cursor_animating || cursor_nr_frames == 0)
+		return 500;
 	SDL_Event event = {0};
 	event.type = cursor_swap_event;
 	SDL_PushEvent(&event);
-	return cursor_frame_time[(cursor_frame + 1) % cursor_nr_frames];
+	unsigned next_interval = cursor_frame_time[(cursor_frame + 1) % cursor_nr_frames];
+	return next_interval > 0 ? next_interval : 500;
+#endif
 }
 
 void cursor_init(const char *exe_path)
@@ -914,7 +921,10 @@ void cursor_init(const char *exe_path)
 	read_cursors(&buf, root);
 	atexit(cursor_fini);
 
-	SDL_AddTimer(cursor_frame_time[0], anim_cb, NULL);
+#ifndef __ANDROID__
+	if (nr_cursors > 0 && cursor_frame_time[0] > 0)
+		SDL_AddTimer(cursor_frame_time[0], anim_cb, NULL);
+#endif
 
 	free_resources(root);
 	free(buf.buf);

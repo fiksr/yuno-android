@@ -132,6 +132,60 @@ bool asset_set_voice4_archive(const char *name)
 	return set_archive(name, ARCHIVE_RAW, ASSET_VOICE4, &config.file.voice4);
 }
 
+static char *asset_fs_find_path(const char *name)
+{
+	// 1. Direct check: exact match
+	if (file_exists(name))
+		return xstrdup(name);
+
+	// 2. Direct check with .ogg extension if requested as .wav (YU-NO voice patch)
+	const char *ext = file_extension(name);
+	if (ext && !strcasecmp(ext, "wav")) {
+		char *candidate = xstrdup(name);
+		char *c_ext = (char*)file_extension(candidate);
+		if (c_ext) {
+			// Try lowercase .ogg
+			c_ext[0] = 'o'; c_ext[1] = 'g'; c_ext[2] = 'g';
+			if (file_exists(candidate))
+				return candidate;
+
+			// Try uppercase .OGG
+			c_ext[0] = 'O'; c_ext[1] = 'G'; c_ext[2] = 'G';
+			if (file_exists(candidate))
+				return candidate;
+
+			// Try lowercase directory prefix: e.g. voice_a/ vs VOICE_A/
+			if (!strncasecmp(candidate, "VOICE_", 6)) {
+				candidate[0] = 'v'; candidate[1] = 'o'; candidate[2] = 'i';
+				candidate[3] = 'c'; candidate[4] = 'e'; candidate[5] = '_';
+				c_ext[0] = 'o'; c_ext[1] = 'g'; c_ext[2] = 'g';
+				if (file_exists(candidate))
+					return candidate;
+
+				// Try uppercase VOICE_ with lowercase .ogg
+				candidate[0] = 'V'; candidate[1] = 'O'; candidate[2] = 'I';
+				candidate[3] = 'C'; candidate[4] = 'E'; candidate[5] = '_';
+				if (file_exists(candidate))
+					return candidate;
+			}
+		}
+		free(candidate);
+	}
+
+	// 3. Fallback: case-insensitive directory scan (slow on FUSE, but safe fallback)
+	char *path = path_get_icase(name);
+	if (!path && ext && !strcasecmp(ext, "wav")) {
+		char *candidate = xstrdup(name);
+		char *c_ext = (char*)file_extension(candidate);
+		if (c_ext) {
+			c_ext[0] = 'o'; c_ext[1] = 'g'; c_ext[2] = 'g';
+			path = path_get_icase(candidate);
+		}
+		free(candidate);
+	}
+	return path;
+}
+
 struct archive_data *asset_fs_load(const char *_name)
 {
 	// convert to *nix path
@@ -141,16 +195,7 @@ struct archive_data *asset_fs_load(const char *_name)
 			*p = '/';
 	}
 
-	// get case-insensitive path
-	char *path = path_get_icase(name);
-	// XXX: hack for YU-NO Eng TL: load .ogg file if .wav not found
-	if (!path && !strcasecmp(file_extension(name), "wav")) {
-		char *ext = (char*)file_extension(name);
-		ext[0] = 'o';
-		ext[1] = 'g';
-		ext[2] = 'g';
-		path = path_get_icase(name);
-	}
+	char *path = asset_fs_find_path(name);
 	free(name);
 	if (!path)
 		return NULL;
