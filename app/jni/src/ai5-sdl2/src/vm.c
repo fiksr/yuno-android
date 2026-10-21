@@ -1,0 +1,1315 @@
+/* Copyright (C) 2023 Nunuhara Cabbage <nunuhara@haniwa.technology>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://gnu.org/licenses/>.
+ */
+
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include <ctype.h>
+
+#include "nulib.h"
+#include "nulib/little_endian.h"
+#include "nulib/port.h"
+#include "nulib/string.h"
+#include "nulib/utfsjis.h"
+#include "ai5/arc.h"
+#include "ai5/game.h"
+#include "ai5/mes.h"
+
+#include "ai5.h"
+#include "anim.h"
+#include "asset.h"
+#include "audio.h"
+#include "backlog.h"
+#include "char.h"
+#include "debug.h"
+#include "game.h"
+#include "gfx.h"
+#include "input.h"
+#include "memory.h"
+#include "menu.h"
+#include "texthook.h"
+#include "vm_private.h"
+
+struct vm vm = {0};
+struct memory memory = {0};
+struct memory_ptr memory_ptr = {0};
+struct game *game = NULL;
+
+void _vm_break(const char *file, const char *func, int line, const char *fmt, ...)
+{
+	va_list ap;
+	char buf[1024];
+	va_start(ap, fmt);
+	vsnprintf(buf, 1024, fmt, ap);
+	va_end(ap);
+
+	sys_warning("BREAK(%s:%s:%d): %s", file, func, line, buf);
+	dbg_repl();
+}
+
+void _vm_error(const char *file, const char *func, int line, const char *fmt, ...)
+{
+	va_list ap;
+	char buf[1024];
+	va_start(ap, fmt);
+	vsnprintf(buf, 1024, fmt, ap);
+	va_end(ap);
+
+	sys_warning("ERROR(%s:%s:%d): %s", file, func, line, buf);
+	gfx_error_message(buf);
+
+	if (debug_on_error)
+		dbg_repl();
+	sys_exit(1);
+}
+
+void vm_init(void)
+{
+	vm.ip.code = memory.file_data;
+}
+
+#define LOGGING (vm_flag_is_on(FLAG_LOG) && vm_flag_is_on(FLAG_LOG_ENABLE))
+
+static uint8_t vm_read_byte(void)
+{
+	uint8_t c = vm.ip.code[vm.ip.ptr++];
+	if (LOGGING)
+		backlog_push_byte(c);
+	return c;
+}
+
+static uint8_t vm_peek_byte(void)
+{
+	return vm.ip.code[vm.ip.ptr];
+}
+
+static uint16_t vm_read_word(void)
+{
+	uint16_t v = le_get16(vm.ip.code, vm.ip.ptr);
+	if (LOGGING) {
+		backlog_push_byte(vm.ip.code[vm.ip.ptr]);
+		backlog_push_byte(vm.ip.code[vm.ip.ptr+1]);
+	}
+	vm.ip.ptr += 2;
+	return v;
+}
+
+static uint32_t vm_read_dword(void)
+{
+	uint32_t v = le_get32(vm.ip.code, vm.ip.ptr);
+	if (LOGGING) {
+		backlog_push_byte(vm.ip.code[vm.ip.ptr]);
+		backlog_push_byte(vm.ip.code[vm.ip.ptr+1]);
+		backlog_push_byte(vm.ip.code[vm.ip.ptr+2]);
+		backlog_push_byte(vm.ip.code[vm.ip.ptr+3]);
+	}
+	vm.ip.ptr += 4;
+	return v;
+}
+
+static void vm_stack_push(uint32_t val)
+{
+	vm.stack[vm.stack_ptr++] = val;
+	if (unlikely(vm.stack_ptr >= VM_STACK_SIZE))
+		VM_ERROR("Stack overflow");
+}
+
+static uint32_t vm_stack_pop(void)
+{
+	if (!vm.stack_ptr)
+		VM_ERROR("Tried to pop from empty stack");
+	return vm.stack[--vm.stack_ptr];
+}
+
+void vm_load_file(struct archive_data *file, uint32_t offset)
+{
+	dbg_invalidate(offsetof(struct memory, file_data) + offset, file->size);
+	memcpy(memory.file_data + offset, file->data, file->size);
+	dbg_load_file(file->name, offsetof(struct memory, file_data) + offset, file->size);
+}
+
+void vm_load_data_file(const char *name, uint32_t offset)
+{
+	struct archive_data *data = asset_data_load(name);
+	if (!data) {
+		WARNING("Failed to read data file \"%s\"", name);
+		return;
+	}
+	if (offset + data->size > MEMORY_FILE_DATA_SIZE) {
+		WARNING("Tried to read file beyond end of buffer");
+		goto end;
+	}
+	vm_load_file(data, offset);
+end:
+	archive_data_release(data);
+}
+
+void vm_load_mes(char *name)
+{
+	char *mem_name = mem_mes_name();
+	if (name != mem_name)
+		strcpy(mem_name, name);
+	for (int i = 0; mem_name[i]; i++) {
+		mem_name[i] = toupper(mem_name[i]);
+	}
+	struct archive_data *file = asset_mes_load(name);
+	if (!file)
+		VM_ERROR("Failed to load MES file \"%s\"", name);
+	vm_load_file(file, 0);
+	archive_data_release(file);
+}
+
+void vm_expr_var16(void)
+{
+	vm_stack_push(mem_get_var16(vm_read_byte()));
+}
+
+void vm_expr_var16_const16(void)
+{
+	vm_stack_push(mem_get_var16(vm_read_word()));
+}
+
+void vm_expr_var16_expr(void)
+{
+	vm_stack_push(mem_get_var16(vm_stack_pop()));
+}
+
+void vm_expr_sysvar16_const16(void)
+{
+	vm_stack_push(mem_get_sysvar16(vm_read_word()));
+}
+
+void vm_expr_sysvar16_expr(void)
+{
+	vm_stack_push(mem_get_sysvar16(vm_stack_pop()));
+}
+
+void vm_expr_ptr16_get16(void)
+{
+	int32_t i = vm_stack_pop();
+	uint8_t var = vm_read_byte();
+	uint8_t *src = memory_ptr.system_var16;
+	if (var)
+		src = memory_raw + mem_get_var16(var - 1);
+	if (unlikely(!mem_ptr_valid(src + i * 2, 2)))
+		VM_ERROR("Out of bounds read");
+	vm_stack_push(le_get16(src, i * 2));
+}
+
+void vm_expr_ptr16_get8(void)
+{
+	uint32_t i = vm_stack_pop();
+	uint8_t var = vm_read_byte();
+	uint8_t *src = memory_raw + mem_get_var16(var);
+	if (unlikely(!mem_ptr_valid(src + i, 1)))
+		VM_ERROR("Out of bounds read");
+	vm_stack_push(src[i]);
+}
+
+#define VM_EXPR_OPERATOR(name, op) \
+	void name(void) \
+	{ \
+		uint32_t b = vm_stack_pop(); \
+		uint32_t a = vm_stack_pop(); \
+		vm_stack_push(a op b); \
+	}
+VM_EXPR_OPERATOR(vm_expr_plus,   +)
+VM_EXPR_OPERATOR(vm_expr_minus,  -)
+VM_EXPR_OPERATOR(vm_expr_mul,    *)
+VM_EXPR_OPERATOR(vm_expr_div,    /)
+VM_EXPR_OPERATOR(vm_expr_mod,    %)
+VM_EXPR_OPERATOR(vm_expr_and,   &&)
+VM_EXPR_OPERATOR(vm_expr_or,    ||)
+VM_EXPR_OPERATOR(vm_expr_bitand, &)
+VM_EXPR_OPERATOR(vm_expr_bitior, |)
+VM_EXPR_OPERATOR(vm_expr_bitxor, ^)
+VM_EXPR_OPERATOR(vm_expr_lt,     <)
+VM_EXPR_OPERATOR(vm_expr_gt,     >)
+VM_EXPR_OPERATOR(vm_expr_lte,   <=)
+VM_EXPR_OPERATOR(vm_expr_gte,   >=)
+VM_EXPR_OPERATOR(vm_expr_eq,    ==)
+VM_EXPR_OPERATOR(vm_expr_neq,   !=)
+#undef VM_EXPR_OPERATOR
+
+void vm_expr_minus_unsigned(void)
+{
+	uint32_t b = vm_stack_pop();
+	uint32_t a = vm_stack_pop();
+	if (b > a)
+		vm_stack_push(0);
+	else
+		vm_stack_push(a - b);
+}
+
+void vm_expr_rand(void)
+{
+	uint32_t range = vm_stack_pop();
+	vm_stack_push(rand() % range);
+}
+
+// doukyuusei
+void vm_expr_rand_with_imm_range(void)
+{
+	uint16_t range = vm_read_word();
+	vm_stack_push(rand() % range);
+}
+
+void vm_expr_imm16(void)
+{
+	vm_stack_push(vm_read_word());
+}
+
+void vm_expr_imm32(void)
+{
+	vm_stack_push(vm_read_dword());
+}
+
+void vm_expr_cflag(void)
+{
+	vm_stack_push(mem_get_var4(vm_read_word()));
+}
+
+void vm_expr_cflag_packed(void)
+{
+	vm_stack_push(mem_get_var4_packed(vm_read_word()));
+}
+
+void vm_expr_eflag(void)
+{
+	vm_stack_push(mem_get_var4(vm_stack_pop()));
+}
+
+void vm_expr_eflag_packed(void)
+{
+	vm_stack_push(mem_get_var4_packed(vm_stack_pop()));
+}
+
+void vm_expr_ptr32_get32(void)
+{
+	int32_t i = vm_stack_pop();
+	uint8_t var = vm_read_byte();
+	uint8_t *src = memory_ptr.system_var32;
+	if (var)
+		src = memory_raw + mem_get_var32(var - 1);
+	if (unlikely(!mem_ptr_valid(src + i * 4, 4)))
+		VM_ERROR("Out of bounds read");
+	vm_stack_push(le_get32(src, i * 4));
+
+}
+
+void vm_expr_ptr32_get16(void)
+{
+	int32_t i = vm_stack_pop();
+	uint8_t var = vm_read_byte();
+	uint8_t *src = memory_raw + mem_get_var32(var - 1);
+	if (unlikely(!mem_ptr_valid(src + i * 2, 2)))
+		VM_ERROR("Out of bounds read");
+	vm_stack_push(le_get16(src, i * 2));
+}
+
+void vm_expr_ptr32_get8(void)
+{
+	int32_t i = vm_stack_pop();
+	uint8_t var = vm_read_byte();
+	uint8_t *src = memory_raw + mem_get_var32(var - 1);
+	if (unlikely(!mem_ptr_valid(src + i, 1)))
+		VM_ERROR("Out of bounds read");
+	vm_stack_push(src[i]);
+}
+
+void vm_expr_var32(void)
+{
+	vm_stack_push(mem_get_var32(vm_read_byte()));
+}
+
+static uint32_t vm_expr_end(void)
+{
+	uint32_t r = vm_stack_pop();
+	if (vm.stack_ptr > 0)
+		VM_ERROR("Stack pointer is non-zero at end of expression");
+	return r;
+}
+
+uint32_t vm_eval(void)
+{
+	while (true) {
+		uint8_t op = vm_read_byte();
+		if (op == 0xff)
+			return vm_expr_end();
+		if (game->expr_op[op])
+			game->expr_op[op]();
+		else
+			vm_stack_push(op);
+	}
+	return 0;
+}
+
+uint32_t vm_eval_aiw(void)
+{
+	while (true) {
+		uint8_t op = vm_read_byte();
+		if (op == 0xff)
+			return vm_expr_end();
+		if (op < 0x80) {
+			vm_stack_push(op);
+		} else if (op < 0xa0) {
+			vm_stack_push(mem_get_var32(op - 0x80));
+		} else if (op < 0xe0) {
+			// TODO? (not used in Shuusaku or Kawarazaki-ke)
+			VM_ERROR("Invalid expression opcode: %02x", op);
+		} else if (game->expr_op[op]) {
+			game->expr_op[op]();
+		} else {
+			VM_ERROR("Invalid expression opcode: %02x", op);
+		}
+	}
+	return 0;
+}
+
+static void read_string_param(char *str, uint8_t term)
+{
+	size_t str_i = 0;
+	uint8_t c;
+	for (str_i = 0; (c = vm_read_byte()) != term; str_i++) {
+		if (unlikely(str_i >= STRING_PARAM_SIZE))
+			VM_ERROR("String parameter overflowed buffer");
+		str[str_i] = c;
+	}
+	str[str_i] = '\0';
+}
+
+void vm_read_params(struct param_list *params)
+{
+	int i;
+	uint8_t b;
+	for (i = 0; (b = vm_read_byte()); i++) {
+		if (unlikely(i >= MAX_PARAMS))
+			VM_ERROR("Too many parameters");
+		params->params[i].type = b;
+		if (b == MES_PARAM_EXPRESSION) {
+			params->params[i].val = game->vm.eval();
+		} else {
+			read_string_param(params->params[i].str, 0);
+		}
+	}
+	params->nr_params = i;
+}
+
+void vm_read_params_aiw(struct param_list *params)
+{
+	int i;
+	uint8_t b;
+	for (i = 0; (b = vm_peek_byte()) != 0xff; i++) {
+		if (unlikely(i >= MAX_PARAMS))
+			VM_ERROR("Too many parameters");
+		if (b == 0xf5) {
+			vm_read_byte();
+			params->params[i].type = MES_PARAM_STRING;
+			read_string_param(params->params[i].str, 0xff);
+		} else {
+			params->params[i].type = MES_PARAM_EXPRESSION;
+			params->params[i].val = game->vm.eval();
+		}
+	}
+	params->nr_params = i;
+	vm_read_byte();
+}
+
+char *vm_string_param(struct param_list *params, int i)
+{
+	if (params->nr_params < i)
+		VM_ERROR("Too few parameters");
+	if (params->params[i].type != MES_PARAM_STRING)
+		VM_ERROR("Expected string parameter");
+	return params->params[i].str;
+}
+
+static uint16_t char_opener[] = {
+	0x69, // （
+	0x6b, // 〔
+	0x6d, // ［
+	0x6f, // ｛
+	0x71, // 〈
+	0x73, // 《
+	0x75, // 「
+	0x77, // 『
+	0x79, // 【
+};
+
+static uint16_t char_closer[] = {
+	0x41, // 、
+	0x42, // 。
+	0x45, // ・
+	0x48, // ？
+	0x49, // ！
+	0x6a, // ）
+	0x6c, // 〕
+	0x6e, // ］
+	0x70, // ｝
+	0x72, // 〉
+	0x74, // 》
+	0x76, // 」
+	0x78, // 』
+	0x7a, // 】
+};
+
+bool char_is_opener(const char *_ch)
+{
+	const uint8_t *ch = (const uint8_t*)_ch;
+	if (ch[0] != 0x81 || ch[1] < 0x69 || ch[1] > 0x79)
+		return false;
+	for (int i = 0; i < ARRAY_SIZE(char_opener); i++) {
+		if (char_opener[i] == ch[1])
+			return true;
+	}
+	return false;
+}
+
+bool char_is_closer(const char *_ch)
+{
+	const uint8_t *ch = (const uint8_t*)_ch;
+	if (ch[0] != 0x81 || ch[1] < 0x41 || ch[1] > 0x7a)
+		return false;
+
+	for (int i = 0; i < ARRAY_SIZE(char_closer); i++) {
+		if (char_closer[i] == ch[1])
+			return true;
+	}
+	return false;
+}
+
+bool han_line_breaks = false;
+
+void vm_draw_text(const char *text, unsigned mult)
+{
+	const uint16_t surface = mem_get_sysvar16(mes_sysvar16_dst_surface);
+	const uint16_t start_x = mem_get_sysvar16(mes_sysvar16_text_start_x);
+	const uint16_t end_x = mem_get_sysvar16(mes_sysvar16_text_end_x);
+	const uint16_t char_space = mem_get_sysvar16(mes_sysvar16_char_space);
+	const uint16_t line_space = mem_get_sysvar16(mes_sysvar16_line_space);
+	uint16_t x = mem_get_sysvar16(mes_sysvar16_text_cursor_x);
+	uint16_t y = mem_get_sysvar16(mes_sysvar16_text_cursor_y);
+	bool last_char_is_close = false;
+	while (*text) {
+		int ch;
+		bool zenkaku = SJIS_2BYTE(*text);
+		uint16_t this_char_space = zenkaku ? (char_space / mult): (char_space / (mult * 2));
+		uint16_t this_x = x;
+		if (x + (han_line_breaks ? this_char_space : char_space) > end_x) {
+			x = start_x;
+			y += line_space;
+		}
+
+		// opener at end of line: drop to next line
+		if (x + this_char_space * 2 > end_x && char_is_opener(text)) {
+			x = start_x;
+			y += line_space;
+		}
+
+		// closer at start of line: go to last column of previous line
+		// (game allows some extra space for this)
+		if (x == start_x && !last_char_is_close && char_is_closer(text)) {
+			x = this_x;
+			y -= line_space;
+			last_char_is_close = true;
+		} else {
+			last_char_is_close = false;
+		}
+
+		text = sjis_char2unicode(text, &ch);
+		gfx_text_draw_glyph(x * mult, y, surface, ch);
+		x += this_char_space;
+	}
+	mem_set_sysvar16(mes_sysvar16_text_cursor_x, x);
+	mem_set_sysvar16(mes_sysvar16_text_cursor_y, y);
+}
+
+static void read_zenkaku(char *str)
+{
+	uint8_t c;
+	int str_i = 0;
+	while ((c = vm_peek_byte())) {
+		if (unlikely(!mes_char_is_zenkaku(c)))
+			goto unterminated;
+		str[str_i++] = vm_read_byte();
+		str[str_i++] = vm_read_byte();
+	}
+	vm_read_byte();
+unterminated:
+	str[str_i] = 0;
+}
+
+static void read_hankaku(char *str)
+{
+	uint8_t c;
+	int str_i = 0;
+	while ((c = vm_peek_byte())) {
+		if (unlikely(!mes_char_is_hankaku(c)))
+			goto unterminated;
+		str[str_i++] = c;
+		vm_read_byte();
+	}
+	vm_read_byte();
+unterminated:
+	str[str_i] = 0;
+}
+
+void vm_read_text_aiw(char *str, uint8_t term)
+{
+	uint8_t c;
+	int str_i = 0;
+	while ((c = vm_read_byte()) != term) {
+		str[str_i++] = c;
+		if (unlikely(vm_peek_byte() == term)) {
+			WARNING("String is not word-aligned");
+			str[str_i++] = ' ';
+			break;
+		}
+		str[str_i++] = vm_read_byte();
+	}
+	str[str_i] = '\0';
+}
+
+/*
+ * Zenkaku text without logging.
+ */
+void vm_stmt_txt_no_log(void)
+{
+	char str[VM_TXT_BUF_SIZE];
+	read_zenkaku(str);
+	texthook_push(str);
+
+	gfx_text_set_weight(mem_get_sysvar16(mes_sysvar16_font_weight));
+	if (game->draw_text_zen)
+		game->draw_text_zen(str);
+	else
+		vm_draw_text(str, 1);
+}
+
+/*
+ * Hankaku text without logging.
+ */
+void vm_stmt_str_no_log(void)
+{
+	char str[VM_TXT_BUF_SIZE];
+	read_hankaku(str);
+	texthook_push(str);
+
+	gfx_text_set_weight(mem_get_sysvar16(mes_sysvar16_font_weight));
+	if (game->draw_text_han)
+		game->draw_text_han(str);
+	else
+		vm_draw_text(str, 1);
+}
+
+/*
+ * Zenkaku text with newer logging logic.
+ */
+void vm_stmt_txt_new_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT)) {
+		backlog_prepare();
+		vm_flag_on(FLAG_LOG);
+		backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_ZENKAKU]);
+	}
+
+	vm_stmt_txt_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_off(FLAG_LOG);
+}
+
+/*
+ * Zenkaku text with older logging logic (Kakyuusei).
+ */
+void vm_stmt_txt_old_log(void)
+{
+	if (!vm_flag_is_on(FLAG_LOG_TEXT) && !vm_flag_is_on(FLAG_LOG))
+		backlog_prepare_old();
+	if (vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_on(FLAG_LOG);
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG))
+		backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_ZENKAKU]);
+
+	vm_stmt_txt_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG))
+		vm_flag_off(FLAG_LOG);
+}
+
+/*
+ * Hankaku text with newer logging logic.
+ */
+void vm_stmt_str_new_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT)) {
+		backlog_prepare();
+		vm_flag_on(FLAG_LOG);
+		backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_HANKAKU]);
+	}
+
+	vm_stmt_str_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_off(FLAG_LOG);
+}
+
+/*
+ * Hankaku text with older logging logic (Doukyuusei 2)
+ */
+void vm_stmt_str_old_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_on(FLAG_LOG);
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG))
+		backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_HANKAKU]);
+
+	vm_stmt_str_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG))
+		vm_flag_off(FLAG_LOG);
+}
+
+/*
+ * Unprefixed zenkaku text with newer logging logic.
+ */
+void vm_unprefixed_txt_new_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT)) {
+		backlog_prepare();
+		vm_flag_on(FLAG_LOG);
+	}
+
+	vm_stmt_txt_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_off(FLAG_LOG);
+}
+
+/*
+ * Unprefixed hankaku text with newer logging logic.
+ */
+void vm_unprefixed_str_new_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT)) {
+		backlog_prepare();
+		vm_flag_on(FLAG_LOG);
+	}
+
+	vm_stmt_str_no_log();
+
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_TEXT))
+		vm_flag_off(FLAG_LOG);
+}
+
+#define CHECK_FLAG(i) \
+	do { \
+		if (unlikely(!mem_ptr_valid(memory_ptr.var4 + i, 1))) \
+			VM_ERROR("Out of bounds write"); \
+	} while (0)
+
+void vm_stmt_set_flag_const16(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, game->vm.eval());
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_const16_4bit_wrap(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, game->vm.eval() & 0xf);
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_const16_4bit_saturate(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, min(game->vm.eval(), 0xf));
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_expr(void)
+{
+	int32_t i = game->vm.eval();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, game->vm.eval());
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_expr_4bit_wrap(void)
+{
+	int32_t i = game->vm.eval();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, game->vm.eval() & 0xf);
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_expr_4bit_saturate(void)
+{
+	int32_t i = game->vm.eval();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4(i++, min(game->vm.eval(), 0xf));
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_flag_const16_aiw(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4_packed(i++, min(game->vm.eval(), 0xf));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+void vm_stmt_set_flag_expr_aiw(void)
+{
+	int32_t i = game->vm.eval();
+	do {
+		CHECK_FLAG(i);
+		mem_set_var4_packed(i++, min(game->vm.eval(), 0xf));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+#define CHECK_VAR16(i) \
+	do { \
+		if (unlikely(!mem_ptr_valid(memory_ptr.var16 + (i) * 2, 2))) \
+			VM_ERROR(""); \
+	} while (0)
+
+void vm_stmt_set_var16_const8(void)
+{
+	uint8_t i = vm_read_byte();
+	do {
+		CHECK_VAR16(i);
+		mem_set_var16(i++, game->vm.eval());
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_var16_const16_aiw(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_VAR16(i);
+		mem_set_var16(i++, min(0xffff, game->vm.eval()));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+void vm_stmt_set_var16_expr_aiw(void)
+{
+	uint32_t i = game->vm.eval();
+	do {
+		CHECK_VAR16(i);
+		mem_set_var16(i++, min(0xffff, game->vm.eval()));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+#define CHECK_VAR32(i) \
+	do { \
+		if (unlikely(!mem_ptr_valid(memory_ptr.var32 + i * 4, 4))) \
+			VM_ERROR("Out of bounds write"); \
+	} while (0)
+
+void vm_stmt_set_var32_const8(void)
+{
+	int32_t i = vm_read_byte();
+	do {
+		CHECK_VAR32(i);
+		mem_set_var32(i++, game->vm.eval());
+	} while (vm_read_byte());
+}
+
+void vm_stmt_set_var32_const8_aiw(void)
+{
+	uint8_t i = vm_read_byte();
+	CHECK_VAR32(i);
+	mem_set_var32(i, game->vm.eval());
+}
+
+#define CHECK_SYSVAR16(i) \
+	do { \
+		if (unlikely(!mem_ptr_valid(memory_ptr.system_var16 + (i) * 2, 2))) \
+			VM_ERROR("Out of bounds write"); \
+	} while (0)
+
+void vm_stmt_set_sysvar16_const16_aiw(void)
+{
+	uint16_t i = vm_read_word();
+	do {
+		CHECK_SYSVAR16(i);
+		mem_set_sysvar16(i++, min(game->vm.eval(), 0xffff));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+void vm_stmt_set_sysvar16_expr_aiw(void)
+{
+	int32_t i = game->vm.eval();
+	do {
+		CHECK_SYSVAR16(i);
+		mem_set_sysvar16(i++, min(game->vm.eval(), 0xffff));
+	} while (vm_peek_byte() != 0xff);
+	vm_read_byte();
+}
+
+void vm_stmt_ptr16_set8(void)
+{
+	int32_t i = game->vm.eval();
+	uint8_t var = vm_read_byte();
+	uint8_t *dst = memory_raw + mem_get_var16(var) + i;
+
+	do {
+		if (unlikely(!mem_ptr_valid(dst, 1)))
+			VM_ERROR("Out of bounds write");
+		*dst++ = game->vm.eval();
+	} while (vm_read_byte());
+}
+
+void vm_stmt_ptr16_set16(void)
+{
+	int32_t i = game->vm.eval();
+	uint8_t var = vm_read_byte();
+	uint8_t *dst = memory_ptr.system_var16;
+	if (var)
+		dst = memory_raw + mem_get_var16(var - 1);
+
+	do {
+		if (unlikely(!mem_ptr_valid(dst + i * 2, 2)))
+			VM_ERROR("Out of bounds write");
+		le_put16(dst, i * 2, game->vm.eval());
+		i++;
+	} while (vm_read_byte());
+}
+
+void vm_stmt_ptr32_set32(void)
+{
+	int32_t i = game->vm.eval();
+	uint8_t var = vm_read_byte();
+	uint8_t *dst = memory_ptr.system_var32;
+	if (var)
+		dst = memory_raw + mem_get_var32(var - 1);
+
+	do {
+		if (unlikely(!mem_ptr_valid(dst + i*4, 4)))
+			VM_ERROR("Out of bounds write");
+		le_put32(dst, i * 4, game->vm.eval());
+		i++;
+	} while (vm_read_byte());
+}
+
+void vm_stmt_ptr32_set16(void)
+{
+	int32_t i = game->vm.eval();
+	uint8_t var = vm_read_byte();
+	uint8_t *dst = memory_raw + mem_get_var32(var - 1);
+
+	do {
+		if (unlikely(!mem_ptr_valid(dst + i*2, 2)))
+			VM_ERROR("Out of bounds write");
+		le_put16(dst, i * 2, game->vm.eval());
+		i++;
+	} while (vm_read_byte());
+}
+
+void vm_stmt_ptr32_set8(void)
+{
+	int32_t i = game->vm.eval();
+	uint8_t var = vm_read_byte();
+	uint8_t *dst = memory_raw + mem_get_var32(var - 1) + i;
+
+	do {
+		if (unlikely(!mem_ptr_valid(dst, 1)))
+			VM_ERROR("Out of bounds write");
+		*dst++ = game->vm.eval();
+	} while (vm_read_byte());
+}
+
+void vm_stmt_jz(void)
+{
+	uint32_t val = game->vm.eval();
+	uint32_t ptr = vm_read_dword();
+	if (val == 1)
+		return;
+	vm.ip.ptr = ptr;
+}
+
+void vm_stmt_jmp(void)
+{
+	vm.ip.ptr = le_get32(vm.ip.code, vm.ip.ptr);
+}
+
+static void _vm_stmt_sys(void)
+{
+	uint32_t no = game->vm.eval();
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+
+	if (unlikely(no >= GAME_MAX_SYS))
+		VM_ERROR("Invalid System call number: %u", no);
+	if (unlikely(!game->sys[no]))
+		VM_ERROR("System.function[%u] not implemented", no);
+
+	game->sys[no](&params);
+}
+
+void vm_stmt_sys(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_SYS)) {
+		vm_flag_on(FLAG_LOG);
+		backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_SYS]);
+	}
+	_vm_stmt_sys();
+	if (vm_flag_is_on(FLAG_LOG_ENABLE) && vm_flag_is_on(FLAG_LOG_SYS))
+		vm_flag_off(FLAG_LOG);
+}
+
+void vm_stmt_sys_old_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_TEXT)) {
+		vm_flag_on(FLAG_LOG);
+		if (vm_flag_is_on(FLAG_LOG_ENABLE))
+			backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_SYS]);
+	}
+	_vm_stmt_sys();
+	if (vm_flag_is_on(FLAG_LOG))
+		vm_flag_off(FLAG_LOG);
+}
+
+void vm_stmt_mesjmp(void)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+
+	vm_load_mes(vm_string_param(&params, 0));
+	vm_flag_on(FLAG_RETURN);
+}
+
+static void _vm_stmt_mescall(bool save_procedures)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	vm_string_param(&params, 0);
+
+	// save current VM state
+	struct vm_mes_call *frame = &vm.mes_call_stack[vm.mes_call_stack_ptr++];
+	frame->ip = vm.ip;
+	memcpy(frame->mes_name, mem_mes_name(), 12);
+	frame->mes_name[12] = '\0';
+	if (save_procedures)
+		memcpy(frame->procedures, vm.procedures, sizeof(vm.procedures));
+
+	// load and execute mes file
+	vm.ip.ptr = 0;
+	vm.ip.code = memory.file_data;
+	vm_load_mes(params.params[0].str);
+	game->vm.exec();
+
+	// restore previous VM state
+	frame = &vm.mes_call_stack[--vm.mes_call_stack_ptr];
+	vm.ip.code = frame->ip.code;
+	if (!vm_flag_is_on(FLAG_RETURN)) {
+		vm.ip.ptr = frame->ip.ptr;
+		if (save_procedures)
+			memcpy(vm.procedures, frame->procedures, sizeof(vm.procedures));
+		vm_load_mes(frame->mes_name);
+		frame->ip.ptr = 0;
+		frame->ip.code = NULL;
+		frame->mes_name[0] = '\0';
+	}
+}
+
+void vm_stmt_mescall(void)
+{
+	_vm_stmt_mescall(false);
+}
+
+// YU-NO
+void vm_stmt_mescall_save_procedures(void)
+{
+	_vm_stmt_mescall(true);
+}
+
+void vm_stmt_defmenu(void)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	uint32_t addr = vm_read_dword();
+	menu_define(vm_expr_param(&params, 0), addr == vm.ip.ptr + 1);
+	vm.ip.ptr = addr;
+}
+
+struct aiw_menu_entry aiw_menu_entries[AIW_MAX_MENUS][AIW_MAX_MENU_ENTRIES];
+unsigned aiw_menu_nr_entries[AIW_MAX_MENUS];
+
+void vm_stmt_defmenu_aiw(void)
+{
+	uint32_t no = game->vm.eval();
+	if (no >= AIW_MAX_MENUS)
+		VM_ERROR("Invalid menu index: %u", no);
+
+	vm.ip.ptr = vm_read_dword();
+	uint8_t nr_entries = vm_read_byte();
+
+	for (unsigned i = 0; i < nr_entries; i++) {
+		aiw_menu_entries[no][i].cond_addr = vm_read_dword();
+		aiw_menu_entries[no][i].body_addr = vm_read_dword();
+	}
+	aiw_menu_nr_entries[no] = nr_entries;
+}
+
+void vm_call_procedure(unsigned no)
+{
+	if (unlikely(no >= VM_MAX_PROCEDURES))
+		VM_ERROR("Invalid procedure number: %u", no);
+
+	struct vm_pointer saved_ip = vm.ip;
+	vm.ip = vm.procedures[no];
+	game->vm.exec();
+	vm.ip = saved_ip;
+}
+
+void vm_stmt_call(void)
+{
+	bool flag_on = vm_flag_is_on(FLAG_PROC_CLEAR);
+	vm_flag_off(FLAG_PROC_CLEAR);
+
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	vm_call_procedure(vm_expr_param(&params, 0));
+
+	if (flag_on)
+		vm_flag_on(FLAG_PROC_CLEAR);
+}
+
+void vm_stmt_call_old_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_TEXT)) {
+		vm_flag_on(FLAG_LOG);
+		if (vm_flag_is_on(FLAG_LOG_ENABLE))
+			backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_CALL_PROC]);
+	}
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	if (vm_flag_is_on(FLAG_LOG))
+		vm_flag_off(FLAG_LOG);
+	vm_call_procedure(vm_expr_param(&params, 0));
+}
+
+void vm_stmt_util(void)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	if (unlikely(params.nr_params < 1))
+		VM_ERROR("Util without parameters");
+	uint32_t no = vm_expr_param(&params, 0);
+	if (unlikely(no >= GAME_MAX_UTIL))
+		VM_ERROR("Invalid Util number: %u", no);
+	if (unlikely(!game->util[no]))
+		VM_ERROR("Util.function[%u] not implemented", no);
+	game->util[no](&params);
+}
+
+void vm_stmt_line(void)
+{
+	// FIXME: is this correct?
+	if (vm_read_byte())
+		return;
+
+	uint16_t start_x = mem_get_sysvar16(mes_sysvar16_text_start_x);
+	uint16_t cur_y = mem_get_sysvar16(mes_sysvar16_text_cursor_y);
+	uint16_t line_space = mem_get_sysvar16(mes_sysvar16_line_space);
+	mem_set_sysvar16(mes_sysvar16_text_cursor_x, start_x);
+	mem_set_sysvar16(mes_sysvar16_text_cursor_y, cur_y + line_space);
+}
+
+void vm_stmt_line_old_log(void)
+{
+	if (vm_flag_is_on(FLAG_LOG_TEXT)) {
+		vm_flag_on(FLAG_LOG);
+		if (vm_flag_is_on(FLAG_LOG_ENABLE))
+			backlog_push_byte(mes_code_tables.stmt_op_to_int[MES_STMT_CALL_PROC]);
+	}
+	vm_stmt_line();
+	if (vm_flag_is_on(FLAG_LOG))
+		vm_flag_off(FLAG_LOG);
+}
+
+void vm_stmt_defproc(void)
+{
+	uint32_t i = game->vm.eval();
+	if (unlikely(i >= VM_MAX_PROCEDURES))
+		VM_ERROR("Invalid procedure number: %d", i);
+	vm.procedures[i] = vm.ip;
+	vm.procedures[i].ptr += 4;
+	vm.ip.ptr = vm_read_dword();
+}
+
+void vm_stmt_menuexec(void)
+{
+	menu_exec();
+}
+
+bool vm_exec_statement(void)
+{
+#if 0
+	if (!game_is_aiwin() || vm.ip.code[vm.ip.ptr] != 0x13) {
+		printf("%08x: ", vm.ip.ptr);
+		if (vm.ip.code[vm.ip.ptr] < 0x80) {
+			struct mes_statement *stmt = mes_parse_statement(vm.ip.code + vm.ip.ptr, 8192);
+			if (!stmt) {
+				WARNING("Failed to parse statement @ %08x", vm.ip.ptr);
+			} else {
+				mes_statement_print(stmt, port_stdout());
+				mes_statement_free(stmt);
+			}
+		} else {
+			printf("[unprefixed text]\n");
+		}
+	}
+#endif
+
+	uint8_t op = vm_peek_byte();
+retry:
+	if (unlikely(!game->stmt_op[op])) {
+		if (op == game->vm.end_code)
+			return false;
+		if (op == MES_STMT_BREAKPOINT) {
+			op = dbg_handle_breakpoint((vm.ip.code + vm.ip.ptr - 1) - memory_raw);
+			goto retry;
+		}
+		if (mes_char_is_hankaku(op)) {
+			if (game->unprefixed_han)
+				game->unprefixed_han();
+			else
+				vm_unprefixed_str_new_log();
+		} else {
+			if (game->unprefixed_zen)
+				game->unprefixed_zen();
+			else
+				vm_unprefixed_txt_new_log();
+		}
+	} else {
+		vm_read_byte();
+		game->stmt_op[op]();
+	}
+	return true;
+}
+
+void vm_peek(void)
+{
+	handle_events();
+	anim_execute();
+	audio_update();
+
+	// XXX: prevent re-entrant update calls
+	static bool in_game_update = false;
+	if (game->update && !in_game_update) {
+		in_game_update = true;
+		game->update();
+		in_game_update = false;
+	}
+
+	gfx_update();
+}
+
+void vm_exec(void)
+{
+	vm.scope_counter++;
+	while (true) {
+		if (vm_flag_is_on(FLAG_RETURN)) {
+			if (vm.scope_counter != 1)
+				break;
+			vm_flag_off(FLAG_RETURN);
+			vm.ip.ptr = 0;
+		}
+		if (!vm_exec_statement())
+			break;
+		vm_peek();
+	}
+	vm.scope_counter--;
+}
+
+static char next_mes[33] = {0};
+static bool load_next_mes = false;
+
+void vm_mesjmp_aiw(const char *name)
+{
+	strncpy(next_mes, name, 32);
+	load_next_mes = true;
+}
+
+void vm_stmt_mesjmp_aiw(void)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	vm_mesjmp_aiw(vm_string_param(&params, 0));
+}
+
+void vm_stmt_mescall_aiw(void)
+{
+	struct param_list params = {0};
+	game->vm.read_params(&params);
+	vm_string_param(&params, 0);
+
+	// save current VM state
+	struct vm_mes_call *frame = &vm.mes_call_stack[vm.mes_call_stack_ptr++];
+	frame->ip = vm.ip;
+	memcpy(frame->mes_name, mem_mes_name(), 31);
+	frame->mes_name[31] = '\0';
+
+	// load and execute mes file
+	vm.ip.ptr = 0;
+	vm.ip.code = memory.file_data;
+	vm_load_mes(params.params[0].str);
+	game->vm.exec();
+
+	// restore previous VM state
+	frame = &vm.mes_call_stack[--vm.mes_call_stack_ptr];
+	vm.ip.code = frame->ip.code;
+	vm.ip.ptr = frame->ip.ptr;
+	vm_load_mes(frame->mes_name);
+	frame->ip.ptr = 0;
+	frame->ip.code = NULL;
+	frame->mes_name[0] = '\0';
+}
+
+void vm_exec_aiw(void)
+{
+	while (true) {
+		if (!vm_exec_statement())
+			break;
+		if (load_next_mes) {
+			vm_load_mes(next_mes);
+			vm.ip.ptr = 0;
+			load_next_mes = false;
+			next_mes[0] = '\0';
+		}
+		vm_peek();
+	}
+}

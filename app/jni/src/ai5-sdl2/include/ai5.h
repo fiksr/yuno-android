@@ -1,0 +1,134 @@
+/* Copyright (C) 2023 Nunuhara Cabbage <nunuhara@haniwa.technology>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://gnu.org/licenses/>.
+ */
+
+#ifndef AI5_H
+#define AI5_H
+
+#include "nulib.h"
+
+#ifdef NDEBUG
+#define BUILD_RELEASE
+#else
+#define BUILD_DEBUG
+#endif
+
+typedef char* string;
+
+struct config_arcfile {
+	bool arc;
+	string name;
+};
+
+enum config_stick_behavior {
+	CONFIG_STICK_DISABLED,
+	CONFIG_STICK_CURSOR,
+	CONFIG_STICK_DPAD,
+};
+
+struct config {
+	// [CONFIG]
+	string title;
+	string start_mes;
+	bool voice;
+	bool voicesub;
+	bool sound;
+	bool music;
+	bool effect;
+	bool screen;
+	bool notify;
+
+	// [FILE]
+	struct {
+		struct config_arcfile bg;
+		struct config_arcfile mes;
+		struct config_arcfile bgm;
+		struct config_arcfile voice;
+		struct config_arcfile voice2;
+		struct config_arcfile voice3;
+		struct config_arcfile voice4;
+		struct config_arcfile voicesub;
+		struct config_arcfile effect;
+		struct config_arcfile data;
+		struct config_arcfile priv;
+		struct config_arcfile movie;
+		struct config_arcfile sysse;
+		string cddrv;
+	} file;
+
+	// [GRAPHICS]
+	struct { bool bg_type; } graphics;
+
+	// [MES]
+	struct { bool mes_type; } mes;
+
+	// [DATA]
+	struct { bool data_type; } data;
+
+	// [MONITOR]
+	struct { int screen; } monitor;
+
+	// [VOLUME] / [VOLUMEINFO] / [ENV]
+	struct {
+		int music;
+		int se;
+		int effect;
+		int voice;
+	} volume;
+
+	// [SOUNDINFO] / [ENV]
+	struct {
+		bool music;
+		bool effect;
+		bool voice;
+	} soundinfo;
+
+	// [ITEMWIN]
+	struct {
+		int x;
+		int y;
+	} itemwin;
+
+	// [ENV]
+	struct {
+		bool kettei;
+	} shuusaku;
+
+	char *exe_path;
+	char *font_path;
+	int font_face;
+	double transition_speed;
+	unsigned msg_skip_delay;
+	bool texthook_clipboard;
+	bool texthook_stdout;
+	bool no_warp_mouse;
+	bool map_no_wallslide;
+	struct {
+		bool enabled;
+		float dead_zone;
+		unsigned cursor_speed;
+		enum config_stick_behavior left_stick;
+		enum config_stick_behavior right_stick;
+		bool ui;
+	} controller;
+};
+
+extern struct config config;
+
+extern bool yuno_eng;
+
+void restart(void);
+
+#endif // AI5_H

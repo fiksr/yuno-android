@@ -1,0 +1,171 @@
+name: Build
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build-type: ["debug", "release"]
+
+    name: Linux ${{ matrix.build-type }}
+    steps:
+    - name: Checkout Source
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install meson libpng-dev libsndfile-dev libsdl2-dev libsdl2-ttf-dev libavcodec-dev
+
+    - name: Build
+      run: |
+        mkdir -p out/${{ matrix.build-type }}
+        meson -Dbuildtype=${{ matrix.build-type }} out/${{ matrix.build-type }}
+        ninja -C out/${{ matrix.build-type }}
+
+  flatpak-build:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+    - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+      with:
+        bundle: ai5-sdl2-linux-x86_64-nightly.flatpak
+        manifest-path: technology.haniwa.ai5-sdl2.yml
+        cache-key: flatpak-builder-${{ github.sha }}
+
+  windows-build:
+    runs-on: windows-latest
+    name: Windows
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            base-devel
+            git
+            nasm
+            diffutils
+            vim
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-libsndfile
+
+      - name: Cache FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v5
+        with:
+          path: FFmpeg/destdir
+          key: ${{ runner.os }}-ffmpeg-n7.1.2
+
+      - name: Build FFmpeg
+        if: ${{ steps.cache-ffmpeg.outputs.cache-hit != 'true' }}
+        run: |
+          git clone --depth 1 --branch n7.1.2 https://github.com/FFmpeg/FFmpeg.git
+          cd FFmpeg
+          ./configure --disable-everything \
+            --enable-decoder=cinepak \
+            --enable-decoder=indeo3 \
+            --enable-decoder=pcm_s16le \
+            --enable-demuxer=avi \
+            --enable-demuxer=wav \
+            --enable-protocol=file \
+            --enable-filter=scale \
+            --enable-static \
+            --disable-shared \
+            --disable-doc \
+            --extra-libs=-static \
+            --extra-cflags=--static \
+            --prefix=/mingw64
+          make -j$(nproc)
+          mkdir destdir
+          DESTDIR=destdir make install
+          cd ..
+
+      - name: Install FFmpeg
+        run: |
+          cp -a FFmpeg/destdir/. /
+
+      - name: Build
+        run: |
+          mkdir debug
+          meson debug -Dbuildtype=debug
+          ninja -C debug
+          mkdir release
+          meson release -Dbuildtype=release
+          ninja -C release
+
+      - name: Copy licenses
+        run: |
+          ls /mingw64/share/licenses
+          mkdir dist
+          cp -r /mingw64/share/licenses dist/
+          cp fonts/*.license dist/licenses/
+
+      - name: Package
+        run: |
+          cp release/ai5.exe LICENSE README.md dist/
+          cp debug/ai5.exe dist/ai5-debug.exe
+          mv dist ai5-sdl2
+          zip -r -9 ai5-sdl2-windows-x86_64-nightly.zip ai5-sdl2
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai5
+          path: ai5-sdl2-windows-x86_64-nightly.zip
+
+  nightly:
+    name: Update nightly release
+    permissions: write-all
+    needs: [windows-build, flatpak-build]
+    if: ${{ github.repository == 'nunuhara/ai5-sdl2' && github.ref == 'refs/heads/master' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - name: Update nightly tag
+        uses: richardsimko/update-tag@v1
+        with:
+          tag_name: nightly
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release nightly
+        uses: softprops/action-gh-release@v3
+        with:
+          prerelease: true
+          name: nightly
+          tag_name: nightly
+          files: |
+            ai5-sdl2-windows-x86_64-nightly.zip
+            ai5-sdl2-linux-x86_64-nightly.flatpak
+          fail_on_unmatched_files: true

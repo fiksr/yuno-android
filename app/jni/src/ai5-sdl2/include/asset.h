@@ -1,0 +1,69 @@
+/* Copyright (C) 2023 Nunuhara Cabbage <nunuhara@haniwa.technology>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://gnu.org/licenses/>.
+ */
+
+#ifndef AI5_ASSET_H
+#define AI5_ASSET_H
+
+#include <stdbool.h>
+
+struct archive_data;
+
+enum asset_type {
+	ASSET_BG,
+	ASSET_MES,
+	ASSET_BGM,
+	ASSET_VOICE,
+	ASSET_VOICE2,
+	ASSET_VOICE3,
+	ASSET_VOICE4,
+	ASSET_VOICESUB,
+	ASSET_EFFECT,
+	ASSET_DATA,
+	ASSET_PRIV,
+	ASSET_MOVIE,
+	ASSET_SYSSE,
+#define NR_ASSET_TYPES (ASSET_SYSSE+1)
+};
+
+void asset_init(void);
+void asset_fini(void);
+
+bool asset_set_voice_archive(const char *name);
+bool asset_set_voice2_archive(const char *name);
+bool asset_set_voice3_archive(const char *name);
+bool asset_set_voice4_archive(const char *name);
+
+struct archive_data *asset_load(enum asset_type t, const char *name);
+struct archive_data *asset_mes_load(const char *name);
+struct archive_data *_asset_cg_load(const char *name);
+struct cg *asset_cg_decode(struct archive_data *file);
+struct cg *asset_cg_load(const char *name);
+struct archive_data *asset_bgm_load(const char *name);
+struct archive_data *asset_effect_load(const char *name);
+struct archive_data *asset_voice_load(const char *name);
+struct archive_data *asset_voicesub_load(const char *name);
+struct archive_data *asset_data_load(const char *name);
+
+extern char *asset_mes_name;
+extern char *asset_cg_name;
+extern char *asset_bgm_name;
+extern char *asset_effect_name;
+extern char *asset_data_name;
+
+// default: true
+extern bool asset_effect_is_bgm;
+
+#endif // AI5_ASSET_H

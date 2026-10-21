@@ -1,0 +1,63 @@
+/* Copyright (C) 2023 Nunuhara Cabbage <nunuhara@haniwa.technology>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://gnu.org/licenses/>.
+ */
+
+#ifndef AI5_INPUT_H
+#define AI5_INPUT_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+enum input_event_type {
+	INPUT_NONE = -1,
+	INPUT_ACTIVATE = 0,
+	INPUT_CANCEL = 1,
+	INPUT_UP = 2,
+	INPUT_DOWN = 3,
+	INPUT_LEFT = 4,
+	INPUT_RIGHT = 5,
+	INPUT_SHIFT = 6,
+	INPUT_CTRL = 7,
+	INPUT_SPACE = 9,
+	INPUT_BACKSPACE = 10,
+	INPUT_PAGE_UP = 11,
+	INPUT_PAGE_DOWN = 12,
+	INPUT_L = 13,
+	INPUT_S = 14,
+	INPUT_TAB = 15,
+};
+#define INPUT_NR_INPUTS (INPUT_TAB+1)
+
+#define INPUT_LTRIGGER_BUTTON -100
+#define INPUT_RTRIGGER_BUTTON -101
+
+void input_init(void);
+void handle_events(void);
+void input_key_event(enum input_event_type type, bool down);
+bool input_down(enum input_event_type type);
+void input_consume(enum input_event_type type);
+void voice_toggle(void);
+void _input_wait_until_up(enum input_event_type type);
+void input_wait_until_up(enum input_event_type type);
+enum input_event_type parse_input_event_type(const char *str);
+void map_controller_button(int btn, enum input_event_type e);
+void map_controller_button_implicitly(int btn, enum input_event_type e);
+
+extern uint32_t cursor_swap_event;
+
+struct SDL_WindowEvent;
+void handle_window_event(struct SDL_WindowEvent *e);
+
+#endif // AI5_INPUT_H
