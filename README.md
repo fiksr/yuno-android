@@ -33,9 +33,20 @@ Powered by [`ai5-sdl2`](https://github.com/nunuhara/ai5-sdl2) and SDL2, moderniz
 | :--- | :--- |
 | **1-Finger Tap** | Advance dialogue / Select option / Left Click |
 | **2-Finger Tap** | Open Game Menu / Cancel / Right Click / Back |
+| **2-Finger Hold** | Fast-Forward / Skip Dialogue |
 | **3-Finger Tap** | Toggle Voice Acting (Enabled / Muted) |
 | **Tap Top Edge** | Toggle Voice Acting (alternative gesture) |
 | **Drag / Hold** | Move cursor / interact with scene investigation |
+
+---
+
+## Recent Updates (v1.0.1)
+
+- **Animation Wait Loop Deadlock Fix:** Resolved an infinite 100% CPU freeze during dialogue transitions (such as the Mio hallway scene) by setting `FLAG_ANIM_ENABLE` to `FLAG_ALWAYS_ON` in YU-NO and guarding stream status queries.
+- **Direct Voice Path Optimization:** Replaced synchronous 5,000-file directory scans with direct file existence checks, eliminating the 4–5s blank dialogue box delay and making voice loading instantaneous (<1ms).
+- **Fast-Forward Multi-Touch:** Two-finger hold activates fast-forward dialogue skipping without interfering with single-tap text advancement.
+- **Synthetic Mouse & Touch Filtering:** Filtered out synthetic touch mouse events from the Android SDL backend to prevent touch lockout after multi-finger gestures.
+- **CPU Timer Optimization:** Guarded the cursor animation timer callback from 0ms spinning on mobile hardware.
 
 ---
 
