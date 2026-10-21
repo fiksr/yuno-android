@@ -261,6 +261,8 @@ void anim_wait_all(void)
 
 bool anim_range_running(unsigned start, unsigned end)
 {
+	if (!vm_flag_is_on(FLAG_ANIM_ENABLE))
+		return false;
 	for (unsigned i = start; i < end; i++) {
 		if (streams[i].state != ANIM_STATE_HALTED && streams[i].state != ANIM_STATE_PAUSED)
 			return true;
@@ -531,12 +533,16 @@ void anim_execute(void)
 
 bool anim_stream_running(unsigned stream)
 {
+	if (!vm_flag_is_on(FLAG_ANIM_ENABLE))
+		return false;
 	assert(stream < ANIM_MAX_STREAMS);
 	return streams[stream].state != ANIM_STATE_HALTED;
 }
 
 bool anim_running(void)
 {
+	if (!vm_flag_is_on(FLAG_ANIM_ENABLE))
+		return false;
 	for (int i = 0; i < ANIM_MAX_STREAMS; i++) {
 		if (streams[i].state != ANIM_STATE_HALTED)
 			return true;

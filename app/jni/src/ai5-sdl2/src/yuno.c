@@ -1051,7 +1051,7 @@ struct game game_yuno = {
 	},
 	.flags = {
 		[FLAG_REFLECTOR]    = 0x0002,
-		[FLAG_ANIM_ENABLE]  = 0x0004,
+		[FLAG_ANIM_ENABLE]  = FLAG_ALWAYS_ON,
 		[FLAG_MENU_RETURN]  = 0x0008,
 		[FLAG_RETURN]       = 0x0010,
 		[FLAG_LOG]          = 0x0080,
