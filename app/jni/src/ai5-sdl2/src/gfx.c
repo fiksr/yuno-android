@@ -410,15 +410,10 @@ static void gfx_draw_toast_overlay(void)
 		return;
 	}
 
-	int win_w = 0, win_h = 0;
-	SDL_GetRendererOutputSize(gfx.renderer, &win_w, &win_h);
-	if (win_w <= 0 || win_h <= 0)
-		return;
-
-	int box_w = (win_w < 500) ? (win_w - 40) : 340;
-	int box_h = 44;
-	int box_x = (win_w - box_w) / 2;
-	int box_y = 24;
+	int box_w = 260;
+	int box_h = 28;
+	int box_x = (gfx_view.w - box_w) / 2;
+	int box_y = 12;
 
 	SDL_Rect bg_rect = { box_x, box_y, box_w, box_h };
 	SDL_SetRenderDrawBlendMode(gfx.renderer, SDL_BLENDMODE_BLEND);
@@ -443,6 +438,9 @@ static void gfx_draw_toast_overlay(void)
 		}
 		SDL_FreeSurface(s);
 	}
+
+	// Always reset render draw color to black so letterbox/pillarbox borders remain black
+	SDL_SetRenderDrawColor(gfx.renderer, 0, 0, 0, 255);
 }
 
 void gfx_update(void)
@@ -472,9 +470,11 @@ void gfx_update(void)
 			+ dst_r.x * gfx.display->format->BytesPerPixel;
 		SDL_CALL(SDL_UpdateTexture, gfx.texture, &dst_r, p, gfx.display->pitch);
 	}
+	SDL_SetRenderDrawColor(gfx.renderer, 0, 0, 0, 255);
 	SDL_CALL(SDL_RenderClear, gfx.renderer);
 	SDL_CALL(SDL_RenderCopy, gfx.renderer, gfx.texture, NULL, NULL);
 	gfx_draw_toast_overlay();
+	SDL_SetRenderDrawColor(gfx.renderer, 0, 0, 0, 255);
 	SDL_RenderPresent(gfx.renderer);
 	gfx_clean(gfx.screen);
 }

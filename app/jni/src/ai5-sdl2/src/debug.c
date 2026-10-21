@@ -412,6 +412,9 @@ static void dbg_init(void)
 
 void dbg_repl(void)
 {
+#ifdef __ANDROID__
+	return;
+#else
 	if (!dbg_initialized)
 		dbg_init();
 	switch ((enum dbg_return_code)cmdline_repl(dbg_cmdline, "dbg> ")) {
@@ -420,6 +423,7 @@ void dbg_repl(void)
 	case DBG_QUIT:
 		sys_exit(0);
 	}
+#endif
 }
 
 static enum file_type filename_to_type(const char *filename)

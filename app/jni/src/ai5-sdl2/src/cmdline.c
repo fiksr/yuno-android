@@ -66,10 +66,20 @@ static char *cmdline_gets(const char *prompt)
  */
 static char *cmdline_gets(const char *prompt)
 {
+#ifdef __ANDROID__
+	(void)prompt;
+	return NULL;
+#else
 	char *line = xmalloc(1024);
 	printf("%s", prompt);
 	fflush(stdout);
-	return fgets(line, 1024, stdin);
+	char *ret = fgets(line, 1024, stdin);
+	if (!ret) {
+		free(line);
+		return NULL;
+	}
+	return ret;
+#endif
 }
 #endif
 
@@ -150,15 +160,21 @@ void cmdline_free(cmdline_t cmdline)
 
 int cmdline_repl(cmdline_t cmdline, const char *prompt)
 {
+#ifdef __ANDROID__
+	(void)cmdline;
+	(void)prompt;
+	return 1;
+#else
 	while (1) {
 		char *line = cmdline_gets(prompt);
 		if (!line)
-			continue;
+			return 1;
 		int r = execute_line(cmdline, line);
 		free(line);
 		if (r)
 			return r;
 	}
+#endif
 }
 
 static void cmdline_cmd_help_short(struct cmdline_cmd *cmd, unsigned name_len)
